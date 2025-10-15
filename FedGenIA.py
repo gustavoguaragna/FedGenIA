@@ -247,14 +247,15 @@ def main():
         g_loss_c = 0.0
         d_loss_c = 0.0
         total_d_samples = 0 
-        params = []
-        results = []
 
         chunk_bar = tqdm(range(num_chunks), desc="Chunks", leave=True, position=1)
 
         # Chunk/round loop
         for chunk_idx in chunk_bar:
             chunk_start_time = time.time()
+
+            params = []
+            results = []
 
             d_loss_b = 0
             total_chunk_samples = 0

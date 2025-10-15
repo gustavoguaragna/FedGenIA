@@ -384,8 +384,48 @@ class GeneratedDataset(torch.utils.data.Dataset):
             self.label_col_name: int(self.labels[idx])
         }
     
-def generate_plot(net, device, round_number, client_id = None, examples_per_class: int=5, classes: int=10, latent_dim: int=100, folder: str="."):
-    """Genenerate image plot across classes."""
+def generate_plot(net, device, round_number, client_id = None, examples_per_class: int=5, classes: int=10, latent_dim: int=128, folder: str="."):
+    """
+    Generate and save a grid plot of images produced by a generative model across all classes.
+
+    This function samples latent vectors and corresponding class labels to generate 
+    synthetic images using a trained generator network (`net`). It then arranges the 
+    generated images into a grid (one row per class, several examples per class) and 
+    saves the plot as a `.png` file. The saved file includes metadata (round number 
+    and optionally client ID) in its filename.
+
+    Parameters
+    ----------
+    net : torch.nn.Module
+        The trained generator model used to synthesize images.
+    device : torch.device
+        The computation device on which the model and tensors are placed (e.g., 'cpu' or 'cuda').
+    round_number : int
+        The current round number, used for labeling and saving the plot.
+    client_id : int, optional
+        Identifier for the client. If provided, it appears in the title 
+        and filename. Defaults to None.
+    examples_per_class : int, default=5
+        Number of generated images to display per class.
+    classes : int, default=10
+        Total number of classes to visualize.
+    latent_dim : int, default=128
+        Dimensionality of the latent input vector to the generator.
+    folder : str, default="."
+        Directory path where the generated plot image will be saved.
+
+    Output
+    ------
+    A `.png` file saved in the specified `folder`, containing a grid of generated images. 
+    The filename follows the pattern:
+        - `{dataset}{net_type}_r{round_number}.png` (server)
+        - `{dataset}{net_type}_r{round_number}_c{client_id}.png` (client)
+
+    Returns
+    -------
+    None
+        This function does not return any object; it saves the plot as an image file.
+    """
 
     net_type = type(net).__name__
     net.to(device)

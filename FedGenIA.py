@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description="FedGenIA")
 
     parser.add_argument("--alpha", type=float, default=0.1)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], default="mnist")
     parser.add_argument("--local_test_frac", type=float, default=0.2)
     parser.add_argument("--num_chunks", type=int, default=100)
@@ -42,6 +42,7 @@ def main():
 
     args = parser.parse_args()
 
+    # Set hyperparameters
     alpha_dir = args.alpha
     batch_size = args.batch_size
     dataset = args.dataset
@@ -93,6 +94,7 @@ def main():
     else:
         partitioner = ClassPartitioner(num_partitions=num_partitions, seed=seed, label_column="label")
 
+    # Initialize models, optimizers, and set loss function
     if dataset == "mnist":
         image = "image"
         
@@ -128,58 +130,7 @@ def main():
     optims = [torch.optim.Adam(net.parameters(), lr=0.01) for net in nets]
     criterion = torch.nn.CrossEntropyLoss()
 
-
-    fds = FederatedDataset(
-        dataset=dataset,
-        partitioners={"train": partitioner}
-    )
-
-    train_partitions = [fds.load_partition(i, split="train") for i in range(num_partitions)]
-
-    # Test Mode
-    if args.test_mode:
-        num_samples = [int(len(train_partition)/100) for train_partition in train_partitions]
-        train_partitions = [train_partition.select(range(n)) for train_partition, n in zip(train_partitions, num_samples)]
-
-    # min_lbl_count = 0.05
-    # class_labels = train_partitions[0].info.features["label"]
-    # labels_str = class_labels.names
-    # label_to_client = {lbl: [] for lbl in labels_str}
-    # for idx, ds in enumerate(train_partitions):
-    #     counts = Counter(ds['label'])
-    #     for label, cnt in counts.items():
-    #         if cnt / len(ds) >= min_lbl_count:
-    #             label_to_client[class_labels.int2str(label)].append(idx)
-
-    def apply_transforms(batch):
-        batch[image] = [pytorch_transforms(img) for img in batch[image]]
-        return batch
-
-    train_partitions = [train_partition.with_transform(apply_transforms) for train_partition in train_partitions]
-
-    testpartition = fds.load_split("test")
-    testpartition = testpartition.with_transform(apply_transforms)
-    testloader = DataLoader(testpartition, batch_size=batch_size)
-
-    client_datasets = []
-
-    for train_part in train_partitions:
-        total     = len(train_part)
-        test_size = int(total * local_test_frac)
-        train_size = total - test_size
-
-        client_train, client_test = random_split(
-            train_part,
-            [train_size, test_size],
-            generator=torch.Generator().manual_seed(seed),
-        )
-
-        client_datasets.append({
-            "train": client_train,
-            "test":  client_test,
-        })
-    
-    folder = f"{dataset}_{partition_dist}_{alpha_dir}_numchunks{num_chunks}"
+    folder = f"{dataset}_{partition_dist}_{alpha_dir}" if partition_dist == "Dirichlet" else f"{dataset}_{partition_dist}"
     os.makedirs(folder, exist_ok=True)
 
     if checkpoint_epoch:
@@ -200,7 +151,46 @@ def main():
             optim_d.load_state_dict(state_optim)
         start_epoch = checkpoint_epoch
 
-    seed = seed 
+    # Load and partition dataset
+    fds = FederatedDataset(
+        dataset=dataset,
+        partitioners={"train": partitioner}
+    )
+
+    train_partitions = [fds.load_partition(i, split="train") for i in range(num_partitions)]
+
+    if args.test_mode:
+        num_samples = [int(len(train_partition)/100) for train_partition in train_partitions]
+        train_partitions = [train_partition.select(range(n)) for train_partition, n in zip(train_partitions, num_samples)]
+
+    def apply_transforms(batch):
+        batch[image] = [pytorch_transforms(img) for img in batch[image]]
+        return batch
+
+    train_partitions = [train_partition.with_transform(apply_transforms) for train_partition in train_partitions]
+
+    testpartition = fds.load_split("test")
+    testpartition = testpartition.with_transform(apply_transforms)
+    testloader = DataLoader(testpartition, batch_size=64)
+
+    client_datasets = []
+
+    for train_part in train_partitions:
+        total     = len(train_part)
+        test_size = int(total * local_test_frac)
+        train_size = total - test_size
+
+        client_train, client_test = random_split(
+            train_part,
+            [train_size, test_size],
+            generator=torch.Generator().manual_seed(seed),
+        )
+
+        client_datasets.append({
+            "train": client_train,
+            "test":  client_test,
+        })
+
     client_chunks = []
     for train_partition in client_datasets:
         dts = train_partition["train"]
@@ -221,9 +211,10 @@ def main():
 
         client_chunks.append(chunks)
 
-    client_test_loaders = [DataLoader(dataset=ds["test"], batch_size=batch_size, shuffle=True) for ds in client_datasets]
+    client_test_loaders = [DataLoader(dataset=ds["test"], batch_size=64, shuffle=True) for ds in client_datasets]
 
-    losses_dict = {
+    # Training loop
+    metrics_dict = {
                 "g_losses_chunk": [],
                 "d_losses_chunk": [],
                 "g_losses_round": [],
@@ -243,19 +234,16 @@ def main():
     epoch_bar = tqdm(range(start_epoch, epochs), desc="Training", leave=True, position=0)
 
     batch_size_gen = 1
-    batch_tam = 32
     latent_dim = 128
     num_classes = 10
 
-    loss_filename = f"{folder}/losses.json"
-    acc_filename = f"{folder}/accuracy_report.txt"
-    # dmax_mismatch_log = f"{folder}/dmax_mismatch.txt"
-    # lambda_log = "lambda_log.txt"
-
+    metrics_filename = f"{folder}/metrics.json"
+    acc_filename = f"{folder}/local_accuracy_report.txt"
+    
+    # Epoch loop
     for epoch in epoch_bar:
         epoch_start_time = time.time()
-        # mismatch_count = 0
-        # total_checked = 0
+        
         g_loss_c = 0.0
         d_loss_c = 0.0
         total_d_samples = 0 
@@ -264,27 +252,30 @@ def main():
 
         chunk_bar = tqdm(range(num_chunks), desc="Chunks", leave=True, position=1)
 
+        # Chunk/round loop
         for chunk_idx in chunk_bar:
             chunk_start_time = time.time()
 
             d_loss_b = 0
             total_chunk_samples = 0
 
-
             client_bar = tqdm(enumerate(zip(nets, models, client_chunks)), desc="Clients", leave=True, position=2)
 
+            # Client loop (Parallelizable)
             for cliente, (net, disc, chunks) in client_bar:
 
                 chunk_dataset = chunks[chunk_idx]
                 if len(chunk_dataset) == 0:
                     print(f"Chunk {chunk_idx} for client {cliente} is empty, skipping.")
                     continue
-                chunk_loader = DataLoader(chunk_dataset, batch_size=batch_tam, shuffle=True)
+
+                chunk_loader = DataLoader(chunk_dataset, batch_size=batch_size, shuffle=True)
                 
+                # Evaluate global model on local test set once per epoch
                 if chunk_idx == 0:
                     client_eval_time = time.time()
-                    # Evaluation in client test
-                    # Initialize counters
+
+                    # Start counters
                     class_correct = defaultdict(int)
                     class_total = defaultdict(int)
                     predictions_counter = defaultdict(int)
@@ -359,6 +350,7 @@ def main():
                             f.write("\n")
                             f.write("\n")
 
+                # Load global model weights
                 net.load_state_dict(global_net.state_dict(), strict=True)
                 net.to(device)
                 net.train()
@@ -366,20 +358,22 @@ def main():
                 disc.to(device)
                 optim_D = optim_Ds[cliente]
 
+                # Create combined dataloader with real and synthetic data
                 start_img_syn_time = time.time()
                 num_samples = int(13 * (math.exp(0.01*epoch) - 1) / (math.exp(0.01*50) - 1)) * 10
                 generated_dataset = GeneratedDataset(generator=gen.to("cpu"), num_samples=num_samples, latent_dim=latent_dim, num_classes=10, device="cpu", image_col_name=image)
                 gen.to(device)
                 cmb_ds = ConcatDataset([chunk_dataset, generated_dataset])
-                combined_dataloader= DataLoader(cmb_ds, batch_size=batch_tam, shuffle=True)
+                combined_dataloader= DataLoader(cmb_ds, batch_size=batch_size, shuffle=True)
                 img_syn_time = time.time() - start_img_syn_time
 
+                # Train classifier on combined dataset
                 batch_bar_net = tqdm(combined_dataloader, desc="Batches", leave=True, position=3)
                 start_net_time = time.time()
                 for batch in batch_bar_net:
                     images, labels = batch[image].to(device), batch["label"].to(device)
-                    batch_size = images.size(0)
-                    if batch_size == 1:
+                    real_batch_size = images.size(0)
+                    if real_batch_size == 1:
                         print("Batch size is 1, skipping batch")
                         continue
                     optim.zero_grad()
@@ -389,42 +383,25 @@ def main():
                     optim.step()
                 net_time = time.time() - start_net_time
 
-                batch_bar = tqdm(chunk_loader, desc="Batches", leave=True, position=4)
+                params.append(ndarrays_to_parameters([val.cpu().numpy() for _, val in net.state_dict().items()]))
+                results.append((cliente, FitRes(status=Status(code=Code.OK, message="Success"), parameters=params[cliente], num_examples=len(chunk_loader.dataset), metrics={})))
 
+                # Train discriminator
                 start_disc_time = time.time()
                 for batch in chunk_loader:
                     images, labels = batch[image].to(device), batch["label"].to(device)
-                    batch_size = images.size(0)
-                    if batch_size == 1:
+                    real_batch_size = images.size(0)
+                    if real_batch_size == 1:
                         print("Batch size is 1, skipping batch")
                         continue
 
-                    real_ident = torch.full((batch_size, 1), 1., device=device)
-                    fake_ident = torch.full((batch_size, 1), 0., device=device)
+                    real_ident = torch.full((real_batch_size, 1), 1., device=device)
+                    fake_ident = torch.full((real_batch_size, 1), 0., device=device)
 
-                    z_noise = torch.randn(batch_size, latent_dim, device=device)
-                    x_fake_labels = torch.randint(0, 10, (batch_size,), device=device)
+                    z_noise = torch.randn(real_batch_size, latent_dim, device=device)
+                    x_fake_labels = torch.randint(0, 10, (real_batch_size,), device=device)
 
                     optim_D.zero_grad()
-
-                    # if wgan:
-                    #     labels = torch.nn.functional.one_hot(labels, 10).float().to(device)
-                    #     x_fake_l = torch.nn.functional.one_hot(x_fake_labels, 10).float()
-
-                    #     # Adicionar labels ao images para treinamento do Discriminador
-                    #     image_labels = labels.view(labels.size(0), 10, 1, 1).expand(-1, -1, 28, 28)
-                    #     image_fake_labels = x_fake_l.view(x_fake_l.size(0), 10, 1, 1).expand(-1, -1, 28, 28)
-
-                    #     images = torch.cat([images, image_labels], dim=1)
-
-                    #     # Treinar Discriminador
-                    #     z = torch.cat([z_noise, x_fake_l], dim=1)
-                    #     fake_images = gen(z).detach()
-                    #     fake_images = torch.cat([fake_images, image_fake_labels], dim=1)
-
-                    #     d_loss = discriminator_loss(disc(images), disc(fake_images)) + 10 * gradient_penalty(disc, images, fake_images)
-
-                    # else:
 
                     y_real = disc(images, labels)
                     d_real_loss = disc.loss(y_real, real_ident)
@@ -436,22 +413,18 @@ def main():
                     d_loss = (d_real_loss + d_fake_loss) / 2
 
                     d_loss.backward()
-                    #torch.nn.utils.clip_grad_norm_(disc.discriminator.parameters(), max_norm=1.0)
                     optim_D.step()
                     d_loss_b += d_loss.item()
-                    total_chunk_samples += batch_size
+                    total_chunk_samples += real_batch_size
                 disc_time = time.time() - start_disc_time  
 
-                params.append(ndarrays_to_parameters([val.cpu().numpy() for _, val in net.state_dict().items()]))
-                results.append((cliente, FitRes(status=Status(code=Code.OK, message="Success"), parameters=params[cliente], num_examples=len(chunk_loader.dataset), metrics={})))
-
+            # Aggregate updated classifier weights
             aggregated_ndarrays = aggregate_inplace(results)
-
             params_dict = zip(global_net.state_dict().keys(), aggregated_ndarrays)
             state_dict = OrderedDict({k: torch.tensor(v).to(device) for k, v in params_dict})
             global_net.load_state_dict(state_dict, strict=True)
 
-            # Evaluation
+            # Evaluation globally each 10 chunks
             if chunk_idx % 10 == 0:
                 global_net.eval()
                 correct, loss = 0, 0.0
@@ -463,19 +436,18 @@ def main():
                         loss += criterion(outputs, labels).item()
                         correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
                 accuracy = correct / len(testloader.dataset)
-                losses_dict["net_loss_chunk"].append(loss / len(testloader))
-                losses_dict["net_acc_chunk"].append(accuracy)
+                metrics_dict["net_loss_chunk"].append(loss / len(testloader))
+                metrics_dict["net_acc_chunk"].append(accuracy)
 
-
+            # Log metrics
             avg_d_loss_chunk = d_loss_b / total_chunk_samples if total_chunk_samples > 0 else 0.0
-            losses_dict["d_losses_chunk"].append(avg_d_loss_chunk)
+            metrics_dict["d_losses_chunk"].append(avg_d_loss_chunk)
             d_loss_c += avg_d_loss_chunk * total_chunk_samples
             total_d_samples += total_chunk_samples
 
+            # Train generator
             chunk_g_loss = 0.0
-
             epoch_gen_bar = tqdm(range(extra_g_e), desc="Generator", leave=True, position=2)
-
             start_gen_time = time.time()
             for g_epoch in epoch_gen_bar:
 
@@ -485,102 +457,41 @@ def main():
                 x_fake_labels = torch.randint(0, 10, (batch_size_gen,), device=device)
                 label = int(x_fake_labels.item())
 
-                # if wgan:
-                #     x_fake_labels = torch.nn.functional.one_hot(x_fake_labels, 10).float()
-                #     z_noise = torch.cat([z_noise, x_fake_labels], dim=1)
-                #     fake_images = gen(z_noise)
-
-                #     # Seleciona o melhor discriminador (Dmax)
-                #     image_fake_labels = x_fake_labels.view(x_fake_labels.size(0), 10, 1, 1).expand(-1, -1, 28, 28)
-                #     fake_images = torch.cat([fake_images, image_fake_labels], dim=1)
-
-                #     y_fake_gs = [model(fake_images.detach()) for model in models]
-
-                # else:
                 x_fake = gen(z_noise, x_fake_labels)
-
-                # if f2a:
-                #     y_fakes = []
-                #     for D in models:
-                #         D = D.to(device)
-                #         y_fakes.append(D(x_fake, x_fake_labels))  # each is [B,1]
-                #     # stack into [N_discriminators, B, 1]
-                #     y_stack = torch.stack(y_fakes, dim=0)
-
-                #     # 4) Compute λ = ReLU(lambda_star) to enforce λ ≥ 0
-                #     lam = relu(lambda_star)
-
-                #     # 5) Soft‐max weights across the 0th dim (discriminators)
-                #     #    we want S_i = exp(λ D_i) / sum_j exp(λ D_j)
-                #     #    shape remains [N, B, 1]
-                #     S = torch.softmax(lam * y_stack, dim=0)
-
-                #     # 6) Weighted sum: D_agg shape [B,1]
-                #     D_agg = (S * y_stack).sum(dim=0)
-
-                #     # 7) Compute your generator loss + β λ² regularizer
-                #     real_ident = torch.full((batch_size_gen, 1), 1., device=device)
-                #     adv_loss   = gen.loss(D_agg, real_ident)       # BCEWithLogitsLoss or whatever
-                #     reg_loss   = beta * lam.pow(2)                 # β λ²
-                #     g_loss     = adv_loss + reg_loss
-
-                # else:
 
                 y_fake_gs = [model(x_fake.detach(), x_fake_labels) for model in models]
                 y_fake_g_means = [torch.mean(y).item() for y in y_fake_gs]
                 dmax_index = y_fake_g_means.index(max(y_fake_g_means))
                 Dmax = models[dmax_index]
 
-                # start_track_mismatch_time = time.time()
-
-                # expected_indexes = label_to_client[class_labels.int2str(x_fake_labels.item())] ##PEGA SOMENTE A PRIMEIRA LABEL, SE BATCH_SIZE_GEN FOR DIFERENTE DE 1 VAI DAR ERRO
-                # if dmax_index not in expected_indexes:
-                #     mismatch_count += 1
-                #     total_checked +=1
-                #     percent_mismatch =  mismatch_count / total_checked
-                #     with open(dmax_mismatch_log, "a") as mismatch_file:
-                #         mismatch_file.write(f"{epoch+1} {x_fake_labels.item()} {expected_indexes} {dmax_index} {percent_mismatch:.2f}\n")
-                # else:
-                #     total_checked += 1
-                #     if g_epoch == extra_g_e - 1 and chunk_idx == num_chunks - 1:
-                #         percent_mismatch =  mismatch_count / total_checked
-                #         with open(dmax_mismatch_log, "a") as mismatch_file:
-                #             mismatch_file.write(f"{epoch+1} {x_fake_labels.item()} {expected_indexes} {dmax_index} {percent_mismatch:.2f}\n")
-                # track_mismatch_time = time.time() - start_track_mismatch_time
-
                 real_ident = torch.full((batch_size_gen, 1), 1., device=device)
-                # if wgan:
-                #     y_fake_g = Dmax(fake_images)
-                #     g_loss = generator_loss(y_fake_g)
 
-                # else:
                 y_fake_g = Dmax(x_fake, x_fake_labels)
                 g_loss = gen.loss(y_fake_g, real_ident)
 
                 g_loss.backward()
-                # torch.nn.utils.clip_grad_norm_(gen.generator.parameters(), max_norm=1.0)
                 optim_G.step()
                 gen.to(device)
                 chunk_g_loss += g_loss.item()
             gen_time = time.time() - start_gen_time
 
-            losses_dict["g_losses_chunk"].append(chunk_g_loss / extra_g_e)
+            # Log metrics
+            metrics_dict["g_losses_chunk"].append(chunk_g_loss / extra_g_e)
             g_loss_c += chunk_g_loss /extra_g_e
 
-            losses_dict["time_chunk"].append(time.time() - chunk_start_time)
-            losses_dict["net_time"].append(net_time)
-            losses_dict["disc_time"].append(disc_time)
-            losses_dict["gen_time"].append(gen_time)
-            losses_dict["img_syn_time"].append(img_syn_time)
-            # losses_dict["track_mismatch_time"].append(track_mismatch_time)
-
+            metrics_dict["time_chunk"].append(time.time() - chunk_start_time)
+            metrics_dict["net_time"].append(net_time)
+            metrics_dict["disc_time"].append(disc_time)
+            metrics_dict["gen_time"].append(gen_time)
+            metrics_dict["img_syn_time"].append(img_syn_time)
 
         g_loss_e = g_loss_c/num_chunks
         d_loss_e = d_loss_c / total_d_samples if total_d_samples > 0 else 0.0
 
-        losses_dict["g_losses_round"].append(g_loss_e)
-        losses_dict["d_losses_round"].append(d_loss_e)
+        metrics_dict["g_losses_round"].append(g_loss_e)
+        metrics_dict["d_losses_round"].append(d_loss_e)
 
+        # Save checkpoint
         if (epoch+1)%10==0:
             checkpoint = {
                     'epoch': epoch+1,
@@ -595,13 +506,7 @@ def main():
             torch.save(checkpoint, checkpoint_file)
             print(f"Global net saved to {checkpoint_file}")
 
-            # if f2a:
-            #     current_lambda_star = lambda_star.item()
-            #     current_lam         = F.relu(lambda_star).item()
-
-            #     with open(lambda_log, "a") as f:
-            #      f.write(f"{current_lambda_star},{current_lam}\n")
-
+        # Evaluate globally each epoch
         correct, loss = 0, 0.0
         global_net.eval()
         with torch.no_grad():
@@ -612,21 +517,22 @@ def main():
                 loss += criterion(outputs, labels).item()
                 correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
         accuracy = correct / len(testloader.dataset)
-        losses_dict["net_loss_round"].append(loss / len(testloader))
-        losses_dict["net_acc_round"].append(accuracy)
+        metrics_dict["net_loss_round"].append(loss / len(testloader))
+        metrics_dict["net_acc_round"].append(accuracy)
 
+        # Log metrics
         print(f"Época {epoch+1} completa")
         generate_plot(gen, "cpu", epoch+1, latent_dim=128, folder=folder)
         gen.to(device)
 
-        losses_dict["time_round"].append(time.time() - epoch_start_time)
+        metrics_dict["time_round"].append(time.time() - epoch_start_time)
 
         try:
-            with open(loss_filename, 'w', encoding='utf-8') as f:
-                json.dump(losses_dict, f, ensure_ascii=False, indent=4)
-            print(f"Losses dict successfully saved to {loss_filename}")
+            with open(metrics_filename, 'w', encoding='utf-8') as f:
+                json.dump(metrics_dict, f, ensure_ascii=False, indent=4)
+            print(f"Metrics dict successfully saved to {metrics_filename}")
         except Exception as e:
-            print(f"Error saving losses dict to JSON: {e}")
+            print(f"Error saving metrics dict to JSON: {e}")
 
 if __name__ == "__main__":
     main()

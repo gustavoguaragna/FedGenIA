@@ -45,26 +45,22 @@ class Net_Cifar(nn.Module):
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
-        x = torch.flatten(x, 1) # flatten all dimensions except batch
+        x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
 
 class F2U_GAN(nn.Module):
-    def __init__(self, dataset="mnist", img_size=28, latent_dim=128, condition=True, seed=None):
+    def __init__(self, img_size=28, latent_dim=128, condition=True, seed=None):
         if seed is not None:
           torch.manual_seed(seed)
         super(F2U_GAN, self).__init__()
-        if dataset == "mnist":
-            self.classes = 10
-            self.channels = 1
-        else:
-            raise NotImplementedError("Only MNIST is supported")
+        self.classes = 10
+        self.channels = 1
 
         self.condition = condition
         self.label_embedding = nn.Embedding(self.classes, self.classes) if condition else None
-        #self.label_embedding_disc = nn.Embedding(self.classes, self.img_size*self.img_size) if condition else None
         self.img_size = img_size
         self.latent_dim = latent_dim
         self.img_shape = (self.channels, self.img_size, self.img_size)
@@ -73,7 +69,8 @@ class F2U_GAN(nn.Module):
 
         self.adv_loss = torch.nn.BCEWithLogitsLoss()
 
-        # Generator (unchanged) To calculate output shape of convtranspose layers, we can use the formula:
+        # Generator
+        # To calculate output shape of convtranspose layers, we can use the formula:
         # output_shape = (input_shape - 1) * stride - 2 * padding + kernel_size + output_padding (or dilation * (kernel_size - 1) + 1 inplace of kernel_size if using dilation)
         self.generator = nn.Sequential(
             nn.Linear(self.input_shape_gen, 256 * 7 * 7),
@@ -89,7 +86,8 @@ class F2U_GAN(nn.Module):
             nn.Tanh()
         )
 
-        # Discriminator (corrected) To calculate output shape of conv layers, we can use the formula:
+        # Discriminator 
+        # To calculate output shape of conv layers, we can use the formula:
         # output_shape = ⌊(input_shape - kernel_size + 2 * padding) / stride + 1⌋ (or (dilation * (kernel_size - 1) - 1) inplace of kernel_size if using dilation)
         self.discriminator = nn.Sequential(
         # Camada 1: (1,28,28) -> (32,13,13)
@@ -105,17 +103,16 @@ class F2U_GAN(nn.Module):
         nn.LeakyReLU(0.2, inplace=True),
 
         # Camada 4: (128,3,3) -> (256,1,1)
-        nn.utils.spectral_norm(nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=0)),  # Padding 0 aqui!
+        nn.utils.spectral_norm(nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=0)),
         nn.LeakyReLU(0.2, inplace=True),
 
-        # Achata e concatena com as labels
         nn.Flatten(), # (256,1,1) -> (256*1*1,)
-        nn.utils.spectral_norm(nn.Linear(256 * 1 * 1, 1))  # 256 (features)
+        nn.utils.spectral_norm(nn.Linear(256 * 1 * 1, 1))
         )
 
     def forward(self, input, labels=None):
         if input.dim() == 2:
-            # Generator forward pass (unchanged)
+            # Generator forward pass
             if self.condition:
                 embedded_labels = self.label_embedding(labels)
                 gen_input = torch.cat((input, embedded_labels), dim=1)
@@ -148,16 +145,12 @@ class F2U_GAN_CIFAR(nn.Module):
         self.channels = 3
         self.condition = condition
 
-        # Embedding para condicionamento
         self.label_embedding = nn.Embedding(self.classes, self.classes) if self.condition else None
 
-        # Shapes de entrada
         self.input_shape_gen = self.latent_dim + (self.classes if self.condition else 0)
         self.input_shape_disc = self.channels + (self.classes if self.condition else 0)
 
-        # -----------------
         #  Generator
-        # -----------------
         self.generator = nn.Sequential(
             nn.Linear(self.input_shape_gen, 512 * 4 * 4),
             nn.ReLU(inplace=True),
@@ -179,13 +172,11 @@ class F2U_GAN_CIFAR(nn.Module):
             nn.Tanh()
         )
 
-        # -----------------
         #  Discriminator
-        # -----------------
         layers = []
         in_ch = self.input_shape_disc
         cfg = [
-            ( 64, 3, 1),  # → spatial stays 32
+            ( 64, 3, 1),  # → 32
             ( 64, 4, 2),  # → 16
             (128, 3, 1),  # → 16
             (128, 4, 2),  # → 8
@@ -208,7 +199,6 @@ class F2U_GAN_CIFAR(nn.Module):
         ]
         self.discriminator = nn.Sequential(*layers)
 
-        # adversarial loss
         self.adv_loss = nn.BCEWithLogitsLoss()
 
     def forward(self, input, labels=None):
@@ -231,7 +221,6 @@ class F2U_GAN_CIFAR(nn.Module):
                 if labels is None:
                     raise ValueError("Labels must be provided for conditional discrimination")
                 embedded = self.label_embedding(labels)
-                # criar mapa de labels e concatenar
                 lbl_map = embedded.view(-1, self.classes, 1, 1).expand(-1, self.classes, self.img_size, self.img_size)
                 x = torch.cat((x, lbl_map), dim=1)
             return self.discriminator(x)
@@ -248,8 +237,8 @@ class GeneratedDataset(torch.utils.data.Dataset):
                  generator,
                  num_samples,
                  latent_dim=100,
-                 num_classes=10, # Total classes the generator model knows
-                 desired_classes=None, # Optional: List of specific class indices to generate
+                 num_classes=10,
+                 desired_classes=None,
                  device="cpu",
                  image_col_name="image",
                  label_col_name="label"):
@@ -275,10 +264,9 @@ class GeneratedDataset(torch.utils.data.Dataset):
         self.generator = generator
         self.num_samples = num_samples
         self.latent_dim = latent_dim
-        # Store the total number of classes the generator understands
         self.total_num_classes = num_classes
         self.device = device
-        self.model_type = type(self.generator).__name__ # Get generator class name
+        self.model_type = type(self.generator).__name__
         self.image_col_name = image_col_name
         self.label_col_name = label_col_name
 
@@ -337,7 +325,6 @@ class GeneratedDataset(torch.utils.data.Dataset):
         # Double check label count (should match num_samples due to logic above)
         if len(labels) != self.num_samples:
              # This indicates an unexpected issue, potentially if num_generated_classes was 0 initially
-             # but num_samples > 0. Raise error or adjust. Let's adjust defensively.
              print(f"Warning: Label count mismatch. Expected {self.num_samples}, got {len(labels)}. Adjusting size.")
              if len(labels) > self.num_samples:
                  labels = labels[:self.num_samples]
@@ -364,23 +351,14 @@ class GeneratedDataset(torch.utils.data.Dataset):
 
                 # Skip if batch is empty (can happen if num_samples = 0)
                 if z_batch.shape[0] == 0:
-                    continue
+                    continue 
 
-                # --- Condition the generator based on its type ---
-                if self.model_type == 'Generator': # Assumes input: concat(z, one_hot_label)
-                    # One-hot encode labels using the TOTAL number of classes the generator knows
-                    labels_one_hot_batch = F.one_hot(labels_batch, num_classes=self.total_num_classes).float()
-                    generator_input = torch.cat([z_batch, labels_one_hot_batch], dim=1)
-                    gen_imgs = self.generator(generator_input)
-                elif self.model_type in ('CGAN', 'F2U_GAN', 'F2U_GAN_CIFAR'): # Assumes input: z, label_index
-                    gen_imgs = self.generator(z_batch, labels_batch)
-                else:
-                    # Handle other potential generator architectures or raise an error
-                    raise NotImplementedError(f"Generation logic not defined for model type: {self.model_type}")
+                # Generate images for the batch
+                gen_imgs = self.generator(z_batch, labels_batch)
 
                 generated_images_list.append(gen_imgs.cpu()) # Move generated images to CPU
 
-        self.generator.cpu() # Move generator back to CPU after generation
+        self.generator.cpu()
 
         # Concatenate all generated image batches
         if generated_images_list:
@@ -389,7 +367,6 @@ class GeneratedDataset(torch.utils.data.Dataset):
             # If no images were generated (e.g., num_samples = 0)
             # Create an empty tensor. Shape needs care - determine from generator or use placeholder.
             # Let's attempt a placeholder [0, C, H, W] - requires knowing C, H, W.
-            # For now, a simple empty tensor. User might need to handle this downstream.
             print("Warning: No images generated. Returning empty tensor for images.")
             all_gen_imgs = torch.empty(0)
 
@@ -404,11 +381,11 @@ class GeneratedDataset(torch.utils.data.Dataset):
             raise IndexError("Dataset index out of range")
         return {
             self.image_col_name: self.images[idx],
-            self.label_col_name: int(self.labels[idx]) # Return label as standard Python int
+            self.label_col_name: int(self.labels[idx])
         }
     
 def generate_plot(net, device, round_number, client_id = None, examples_per_class: int=5, classes: int=10, latent_dim: int=100, folder: str="."):
-    """Gera plot de imagens de cada classe"""
+    """Genenerate image plot across classes."""
 
     net_type = type(net).__name__
     net.to(device)
@@ -420,22 +397,18 @@ def generate_plot(net, device, round_number, client_id = None, examples_per_clas
     labels = torch.tensor([i for i in range(classes) for _ in range(examples_per_class)], device=device)
 
     with torch.no_grad():
-        if net_type == "Generator":
-            labels_one_hot = torch.nn.functional.one_hot(labels, 10).float().to(device)
-            generated_images = net(torch.cat([latent_vectors, labels_one_hot], dim=1))
-        else:
-            generated_images = net(latent_vectors, labels)
+        generated_images = net(latent_vectors, labels)
 
-    # Criar uma figura com 10 linhas e 5 colunas de subplots
+    # Create subplots
     fig, axes = plt.subplots(classes, examples_per_class, figsize=(5, 9))
 
-    # Adiciona título no topo da figura
+    # Add title with round number and client ID if provided
     if isinstance(client_id, int):
         fig.text(0.5, 0.98, f"Round: {round_number} | Client: {client_id}", ha="center", fontsize=12)
     else:
         fig.text(0.5, 0.98, f"Round: {round_number}", ha="center", fontsize=12)
 
-    # Exibir as imagens nos subplots
+    # Display images in subplots
     for i, ax in enumerate(axes.flat):
         if dataset == "mnist":
             ax.imshow(generated_images[i, 0, :, :], cmap='gray')
@@ -445,47 +418,29 @@ def generate_plot(net, device, round_number, client_id = None, examples_per_clas
         ax.set_xticks([])
         ax.set_yticks([])
 
-    # Ajustar o layout antes de calcular as posições
+    # Adjust layout before calculating positions
     plt.tight_layout(rect=[0.05, 0, 1, 0.96])
 
-    # Reduzir espaço entre colunas
-    # plt.subplots_adjust(wspace=0.05)
-
-    # Adicionar os rótulos das classes corretamente alinhados
-    fig.canvas.draw()  # Atualiza a renderização para obter posições corretas
+    # Add class labels with correct alignment
+    fig.canvas.draw()  # Update rendering to get correct positions
     for row in range(classes):
-        # Obter posição do subplot em coordenadas da figura
+        # Get subplot position in figure coordinates
         bbox = axes[row, 0].get_window_extent(fig.canvas.get_renderer())
         pos = fig.transFigure.inverted().transform([(bbox.x0, bbox.y0), (bbox.x1, bbox.y1)])
-        center_y = (pos[0, 1] + pos[1, 1]) / 2  # Centro exato da linha
+        center_y = (pos[0, 1] + pos[1, 1]) / 2  # Exact center of the row
 
-        # Adicionar o rótulo
+        # Add label
         fig.text(0.04, center_y, str(row), va='center', fontsize=12, color='black')
 
     if isinstance(client_id, int):
         fig.savefig(f"{folder}/{dataset}{net_type}_r{round_number}_c{client_id}.png")
-        print("Imagem do cliente salva")
+        print("Client image saved")
     else:
         fig.savefig(f"{folder}/{dataset}{net_type}_r{round_number}.png")
-        print("Imagem do servidor salva")
+        print("Server image saved")
     plt.close(fig)
     return
     
-# Copyright 2023 Flower Labs GmbH. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-"""Class-based partitioner for Hugging Face Datasets."""
 
 class ClassPartitioner(Partitioner):
     """Partitions a dataset by class, ensuring each class appears in exactly one partition.

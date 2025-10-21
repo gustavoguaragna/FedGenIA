@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--num_chunks", type=int, default=100)
     parser.add_argument("--num_partitions", type=int, default=4)
     parser.add_argument("--partitioner", type=str, choices=["ClassPartitioner", "Dirichlet"], default="ClassPartitioner")
+    parser.add_argument("--strategy", type=str, choices=["fedavg", "fedprox"], default="fedavg")
+    parser.add_argument("--mu", type=float, default=0.5, help="fedprox parameter")
 
     parser.add_argument("--beta1_disc", type=float, default=0.5)
     parser.add_argument("--beta1_gen", type=float, default=0.5)
@@ -50,6 +52,8 @@ def main():
     num_chunks = args.num_chunks
     num_partitions = args.num_partitions
     partition_dist = args.partitioner
+    strategy = args.strategy
+    mu = args.mu
 
     beta1_disc = args.beta1_disc
     beta1_gen = args.beta1_gen
@@ -79,6 +83,7 @@ def main():
     Num Chunks: {num_chunks}
     Num Partitions: {num_partitions}
     Partitioner: {partition_dist}
+    Strategy: {strategy}
     Device: {device}
     """)
 
@@ -130,7 +135,7 @@ def main():
     optims = [torch.optim.Adam(net.parameters(), lr=0.01) for net in nets]
     criterion = torch.nn.CrossEntropyLoss()
 
-    folder = f"{dataset}_{partition_dist}_{alpha_dir}" if partition_dist == "Dirichlet" else f"{dataset}_{partition_dist}"
+    folder = f"{dataset}_{partition_dist}_{alpha_dir}_{strategy}_fedgenia" if partition_dist == "Dirichlet" else f"{dataset}_{partition_dist}_{strategy}_fedgenia"
     os.makedirs(folder, exist_ok=True)
 
     if checkpoint_epoch:
@@ -379,7 +384,13 @@ def main():
                         continue
                     optim.zero_grad()
                     outputs = net(images)
-                    loss = criterion(outputs, labels)
+                    if strategy == "fedprox":
+                        proximal_term = 0
+                        for local_weights, global_weights in zip(net.parameters(), global_net.parameters()):
+                            proximal_term += (local_weights - global_weights).norm(2)
+                        loss = criterion(net(images), labels) + (mu / 2) * proximal_term
+                    else:
+                        loss = criterion(outputs, labels)
                     loss.backward()
                     optim.step()
                 net_time = time.time() - start_net_time
@@ -456,7 +467,6 @@ def main():
 
                 z_noise = torch.randn(batch_size_gen, latent_dim, device=device)
                 x_fake_labels = torch.randint(0, 10, (batch_size_gen,), device=device)
-                label = int(x_fake_labels.item())
 
                 x_fake = gen(z_noise, x_fake_labels)
 
@@ -523,7 +533,7 @@ def main():
 
         # Log metrics
         print(f"Época {epoch+1} completa")
-        generate_plot(gen, "cpu", epoch+1, latent_dim=128, folder=folder)
+        generate_plot(net=gen, device="cpu", round_number=epoch+1, latent_dim=128, folder=folder)
         gen.to(device)
 
         metrics_dict["time_round"].append(time.time() - epoch_start_time)

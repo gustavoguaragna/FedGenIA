@@ -483,7 +483,6 @@ def main():
 
                 # Train discriminator
                 start_disc_time = time.time()
-
                 for batch in chunk_loader:
                     images, labels = batch[image].to(device), batch["label"].to(device)
                     real_batch_size = images.size(0)

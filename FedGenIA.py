@@ -23,17 +23,8 @@ def state_dict_to_vector(sd):
 def vector_subtract(vecA, vecB):
     return [a - b for a, b in zip(vecA, vecB)]
 
-def vector_add(vecA, vecB):
-    return [a + b for a, b in zip(vecA, vecB)]
-
 def vector_scale(vec, scalar):
     return [v * scalar for v in vec]
-
-def vector_to_state_dict(keys, vec, device):
-    return OrderedDict({k: v.to(device) for k, v in zip(keys, vec)})
-
-def vec_to_numpy_list(vec):
-    return [v.cpu().numpy() for v in vec]
 
 def main():
 

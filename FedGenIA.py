@@ -366,7 +366,7 @@ def main():
 
                 # Create combined dataloader with real and synthetic data
                 start_img_syn_time = time.time()
-                num_samples = int(13 * (math.exp(0.01*epoch) - 1) / (math.exp(0.01*50) - 1)) * 10
+                num_samples = int(math.ceil(len(chunk_dataset)) * (math.exp(0.01*epoch) - 1) / (math.exp(0.01*epochs) - 1))
                 generated_dataset = GeneratedDataset(generator=gen.to("cpu"), num_samples=num_samples, latent_dim=latent_dim, num_classes=10, device="cpu", image_col_name=image)
                 gen.to(device)
                 cmb_ds = ConcatDataset([chunk_dataset, generated_dataset])
